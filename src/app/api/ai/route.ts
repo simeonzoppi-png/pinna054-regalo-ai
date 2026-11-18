@@ -14,16 +14,21 @@
  */
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { chiediAlModello, ErroreAi, SchemaDomande, SchemaRegali } from "@/gifty/ai";
-import { domandeDemo, regaliDemo } from "@/gifty/demo";
-import { conFoto, fotoAttive } from "@/gifty/foto";
-import { BATCH, DOMANDE_PER_ROUND, promptDomande, promptRegali, VERSIONE_PROMPT_GIFTY } from "@/gifty/prompt";
+import { chiediAlModello, ErroreAi, SchemaDomande, SchemaDossier, SchemaRegali } from "@/gifty/ai";
+import { budget } from "@/gifty/budget";
+import { domandeDemo, dossierDemo, regaliDemo } from "@/gifty/demo";
+import { cercaFoto, fotoAttive } from "@/gifty/foto";
+import { servizioProdotti, trovaProdotto } from "@/gifty/prodotti";
+import { BATCH, DOMANDE_PER_ROUND, promptDomande, promptDossier, promptRegali, VERSIONE_PROMPT_GIFTY } from "@/gifty/prompt";
 import { effortMotore, modelloMotore } from "@/lib/ambiente";
 import { ipRichiesta } from "@/lib/ip";
 import { controllaLimiteAzione, controllaLimitiAi } from "@/lib/limiti";
+import { linkAmazon, linkGoogleShopping } from "@/motore/link";
 import { pulisciTesto } from "@/motore/richiesta";
+import { PAESE_PREDEFINITO, trovaPaese } from "@/config/paesi";
 
-export const maxDuration = 60;
+// Il dossier e i regali fanno ragionare il modello più a lungo
+export const maxDuration = 120;
 
 // Testi brevi e ripuliti da email e numeri di telefono, per sicurezza e per non sprecare token
 const testo = (max: number) => z.string().trim().min(1).max(max).transform(pulisciTesto);
@@ -37,7 +42,17 @@ const lingua = z.enum(["it", "en"]);
 
 const SchemaRichiesta = z.discriminatedUnion("tipo", [
   z.object({ tipo: z.literal("domande"), lingua, giro: z.union([z.literal(1), z.literal(2)]), risposte: SchemaRisposte, chieste: elenco }),
-  z.object({ tipo: z.literal("regali"), lingua, risposte: SchemaRisposte, piaciute: elenco, scartate: elenco, mostrate: elenco }),
+  z.object({ tipo: z.literal("dossier"), lingua, risposte: SchemaRisposte }),
+  z.object({
+    tipo: z.literal("regali"),
+    lingua,
+    risposte: SchemaRisposte,
+    // il dossier scritto dall'AI torna dal browser: lo limitiamo e lo ripuliamo come ogni altro testo
+    dossier: z.string().max(4000).default("").transform(pulisciTesto),
+    piaciute: elenco,
+    scartate: elenco,
+    mostrate: elenco,
+  }),
 ]);
 type Richiesta = z.infer<typeof SchemaRichiesta>;
 
@@ -47,14 +62,50 @@ function aiAttiva(): boolean {
 }
 
 export async function GET() {
-  return NextResponse.json({ attiva: aiAttiva(), foto: fotoAttive() }, { headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json(
+    { attiva: aiAttiva(), prodotti: servizioProdotti() !== null, foto: fotoAttive() },
+    { headers: { "Cache-Control": "no-store" } },
+  );
+}
+
+/**
+ * Link per comprare ogni regalo, costruiti SOLO dalla query di ricerca (il modello non scrive URL).
+ * Prezzi in euro → negozi italiani; Amazon con il tag di affiliazione AMAZON_TAG_IT se impostato.
+ */
+function conLink<T extends { search: string; name: string }>(regali: T[], lingua: string) {
+  const paese = trovaPaese(PAESE_PREDEFINITO)!;
+  return regali.map((g) => {
+    const query = g.search || g.name;
+    const amazon = linkAmazon(query, paese);
+    return { ...g, link_amazon: amazon.url, affiliato: amazon.affiliato, link_google: linkGoogleShopping(query, paese, lingua) };
+  });
+}
+
+/**
+ * Per ogni idea: il prodotto VERO (Google Shopping) con foto, prezzo, negozio e link;
+ * se non si trova, una foto rappresentativa (Pexels); altrimenti resta l'emoji.
+ */
+async function conProdotti<T extends { search: string; name: string; photo: string; price: number }>(
+  regali: T[],
+  r: { lingua: string; risposte: { q: string; a: string[] }[] },
+) {
+  const { max } = budget(r.risposte);
+  const arricchiti = await Promise.all(
+    regali.map(async (g) => {
+      const prodotto = await trovaProdotto(g.search || g.name, max, g.price);
+      const foto = prodotto ? null : await cercaFoto(g.photo);
+      return { ...g, prodotto, foto, price: prodotto?.prezzo ?? g.price };
+    }),
+  );
+  return conLink(arricchiti, r.lingua);
 }
 
 /** Risposta senza AI (modalità demo). */
 async function rispostaDemo(r: Richiesta) {
   if (r.tipo === "domande") return NextResponse.json({ demo: true, ...domandeDemo(r.lingua, r.giro, r.risposte, r.chieste) });
-  const { gifts, ...resto } = regaliDemo(r.lingua, r.risposte, r.piaciute, r.scartate, r.mostrate);
-  return NextResponse.json({ demo: true, ...resto, gifts: await conFoto(gifts) });
+  if (r.tipo === "dossier") return NextResponse.json({ demo: true, ...dossierDemo(r.lingua, r.risposte) });
+  const { gifts } = regaliDemo(r.lingua, r.risposte, r.piaciute, r.scartate, r.mostrate);
+  return NextResponse.json({ demo: true, gifts: await conProdotti(gifts, r) });
 }
 
 export async function POST(request: Request) {
@@ -86,20 +137,41 @@ export async function POST(request: Request) {
         effort: "low",
         maxToken: 6000,
       });
-      // Teniamo solo vere domande, al massimo quante ne prevede il round
-      const questions = domande.questions.filter((q) => q.question.includes("?")).slice(0, DOMANDE_PER_ROUND[r.giro]);
+      // Teniamo le carte complete (una "questo o quello" deve avere le due scelte), al massimo quante ne prevede il round
+      const questions = domande.questions
+        .filter((q) => q.question.trim() && (q.kind === "yn" || (q.left.trim() && q.right.trim())))
+        .map((q) => (q.kind === "yn" ? { ...q, left: "No", right: r.lingua === "it" ? "Sì" : "Yes" } : q))
+        .slice(0, DOMANDE_PER_ROUND[r.giro]);
       console.info(`[ai] domande round ${r.giro} · ${modello} · ${VERSIONE_PROMPT_GIFTY} · ${Date.now() - inizio} ms`);
       return NextResponse.json({ demo: false, questions, open_question: domande.open_question });
     }
 
-    const { gifts, portrait, badges } = await chiediAlModello(
-      promptRegali(r.lingua, r.risposte, r.piaciute, r.scartate, r.mostrate),
+    if (r.tipo === "dossier") {
+      // Lo studio della persona: qui il modello ragiona a fondo
+      const dossier = await chiediAlModello(promptDossier(r.lingua, r.risposte), SchemaDossier, {
+        modello,
+        effort: "high",
+        maxToken: 16000,
+      });
+      console.info(`[ai] dossier · ${modello} · ${VERSIONE_PROMPT_GIFTY} · ${Date.now() - inizio} ms`);
+      return NextResponse.json({
+        demo: false,
+        dossier: dossier.dossier,
+        insights: dossier.insights.slice(0, 5),
+        portrait: dossier.portrait,
+        badges: dossier.badges.slice(0, 3),
+      });
+    }
+
+    const { gifts } = await chiediAlModello(
+      promptRegali(r.lingua, r.risposte, r.dossier, r.piaciute, r.scartate, r.mostrate),
       SchemaRegali,
       { modello, effort: effortMotore(), maxToken: 16000 },
     );
-    const conLeFoto = await conFoto(gifts.slice(0, BATCH));
-    console.info(`[ai] ${gifts.length} regali · ${modello} · ${VERSIONE_PROMPT_GIFTY} · ${Date.now() - inizio} ms`);
-    return NextResponse.json({ demo: false, portrait, badges: badges.slice(0, 3), gifts: conLeFoto });
+    const completi = await conProdotti(gifts.slice(0, BATCH), r);
+    const trovati = completi.filter((g) => g.prodotto).length;
+    console.info(`[ai] ${gifts.length} regali (${trovati} prodotti veri) · ${modello} · ${VERSIONE_PROMPT_GIFTY} · ${Date.now() - inizio} ms`);
+    return NextResponse.json({ demo: false, gifts: completi });
   } catch (e) {
     const codice = e instanceof ErroreAi ? e.codice : "non_disponibile";
     console.error(`[ai] ${r.tipo}: ${codice}`, e instanceof Error ? e.message : e);

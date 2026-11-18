@@ -12,7 +12,16 @@ import { clientAnthropic } from "@/motore/modello";
 /** Un round di domande da scorrere, più la domanda aperta (usata solo nel round 1). */
 export const SchemaDomande = z.object({
   questions: z.array(
-    z.object({ emoji: z.string(), question: z.string(), yes_reaction: z.string(), no_reaction: z.string() }),
+    z.object({
+      // "yn" = sì/no (left = No, right = Sì) · "ab" = questo o quello
+      kind: z.enum(["yn", "ab"]),
+      emoji: z.string(),
+      question: z.string(),
+      left: z.string(),
+      right: z.string(),
+      left_reaction: z.string(),
+      right_reaction: z.string(),
+    }),
   ),
   open_question: z.object({ emoji: z.string(), question: z.string(), hint: z.string() }),
 });
@@ -31,10 +40,14 @@ export const SchemaRegalo = z.object({
   search: z.string(),
   photo: z.string(),
 });
-export const SchemaRegali = z.object({
+export const SchemaRegali = z.object({ gifts: z.array(SchemaRegalo) });
+
+/** Il dossier: il profilo che l'AI scrive studiando tutte le risposte, prima dei regali. */
+export const SchemaDossier = z.object({
+  dossier: z.string(),
+  insights: z.array(z.string()),
   portrait: z.string(),
   badges: z.array(z.string()),
-  gifts: z.array(SchemaRegalo),
 });
 export type Regalo = z.infer<typeof SchemaRegalo>;
 

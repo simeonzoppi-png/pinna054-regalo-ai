@@ -13,6 +13,7 @@ import { CATALOGO, type RegaloDemo } from "@/motore/demo/catalogo";
 import { DOMANDE_APERTE, DOMANDE_SI_NO, type DomandaDemo } from "@/motore/demo/domande";
 import { FRASE_TEMA, PAROLE_TEMA, TEMI, type Tema } from "@/motore/demo/temi";
 import { BATCH, DOMANDE_PER_ROUND, type Lingua, type Risposta, type Round } from "./prompt";
+import { budget } from "./budget";
 
 const norm = (s: string) => s.toLowerCase().replace(/[’']/g, "'").replace(/\s+/g, " ").trim();
 function mescola<T>(elenco: T[]): T[] {
@@ -45,9 +46,43 @@ const REAZIONI = {
   },
 };
 
+/** Carte "questo o quello": ogni lato porta ai temi dei regali. */
+type CartaAB = { emoji: string; it: [string, string, string]; en: [string, string, string]; temi: [Tema[], Tema[]] };
+const QUESTO_O_QUELLO: CartaAB[] = [
+  { emoji: "🏝️", it: ["{nome} in vacanza: Ibiza o baita in Trentino?", "Ibiza", "Baita"], en: ["{nome} on holiday: Ibiza or a mountain cabin?", "Ibiza", "Cabin"], temi: [["feste", "viaggi"], ["natura", "relax"]] },
+  { emoji: "🍣", it: ["Ultima cena di {nome}: sushi o carbonara?", "Sushi", "Carbonara"], en: ["{nome}'s last supper: sushi or carbonara?", "Sushi", "Carbonara"], temi: [["cibo", "viaggi"], ["cucina", "cibo"]] },
+  { emoji: "💿", it: ["{nome} ascolta la musica: vinile o Spotify?", "Vinile", "Spotify"], en: ["How {nome} listens: vinyl or Spotify?", "Vinyl", "Spotify"], temi: [["vintage", "musica"], ["tech", "musica"]] },
+  { emoji: "🌅", it: ["Il sabato di {nome}: sveglia all'alba o brunch alle 13?", "Alba", "Brunch"], en: ["{nome}'s Saturday: sunrise alarm or 1pm brunch?", "Sunrise", "Brunch"], temi: [["sport", "natura"], ["relax", "cibo"]] },
+  { emoji: "📚", it: ["Serata ideale di {nome}: libro sul divano o serata fuori?", "Libro", "Serata fuori"], en: ["{nome}'s ideal night: book on the sofa or night out?", "Book", "Night out"], temi: [["lettura", "relax"], ["feste", "musica"]] },
+  { emoji: "🎮", it: ["{nome} sceglie: PlayStation o gioco da tavolo?", "PlayStation", "Da tavolo"], en: ["{nome} picks: PlayStation or board game?", "PlayStation", "Board game"], temi: [["gaming", "tech"], ["giochi", "feste"]] },
+  { emoji: "☕", it: ["Al bar {nome} ordina: espresso o matcha latte?", "Espresso", "Matcha"], en: ["At the café {nome} orders: espresso or matcha latte?", "Espresso", "Matcha"], temi: [["caffe"], ["te", "benessere"]] },
+  { emoji: "🖼️", it: ["Domenica di {nome}: museo o mercatino vintage?", "Museo", "Mercatino"], en: ["{nome}'s Sunday: museum or flea market?", "Museum", "Flea market"], temi: [["arte", "cultura"], ["vintage", "stile"]] },
+  { emoji: "🏃", it: ["{nome} si sfoga: palestra o yoga?", "Palestra", "Yoga"], en: ["{nome} lets off steam: gym or yoga?", "Gym", "Yoga"], temi: [["sport"], ["benessere", "relax"]] },
+  { emoji: "🎬", it: ["Venerdì sera di {nome}: cinema o maratona di serie?", "Cinema", "Serie"], en: ["{nome}'s Friday night: cinema or series marathon?", "Cinema", "Series"], temi: [["film", "cultura"], ["film", "relax"]] },
+  { emoji: "🪴", it: ["Casa di {nome}: giungla di piante o minimal giapponese?", "Giungla", "Minimal"], en: ["{nome}'s home: plant jungle or Japanese minimal?", "Jungle", "Minimal"], temi: [["piante", "casa"], ["ordine", "stile"]] },
+  { emoji: "📷", it: ["In viaggio {nome}: mille foto o zero foto?", "Mille foto", "Zero foto"], en: ["On a trip {nome} takes: a thousand photos or none?", "Loads", "None"], temi: [["foto", "ricordi"], ["avventura", "natura"]] },
+];
+
 /** Il "sì" / "no" di una risposta da scorrere. */
 const eSi = (a: string) => ["sì", "si", "yes"].includes(norm(a));
 const eNo = (a: string) => norm(a) === "no";
+
+function cartaSiNo(lingua: Lingua, area: string, d: DomandaDemo) {
+  return {
+    kind: "yn" as "yn" | "ab",
+    emoji: EMOJI_AREA[area] ?? "🦊",
+    question: d[lingua],
+    left: "No",
+    right: lingua === "it" ? "Sì" : "Yes",
+    left_reaction: aCaso(REAZIONI[lingua].no),
+    right_reaction: aCaso(REAZIONI[lingua].si),
+  };
+}
+function cartaAB(lingua: Lingua, c: CartaAB) {
+  const [question, left, right] = c[lingua];
+  const reazione = (scelta: string) => (lingua === "it" ? `${scelta}, ovviamente! 🦊` : `${scelta}, obviously! 🦊`);
+  return { kind: "ab" as "yn" | "ab", emoji: c.emoji, question, left, right, left_reaction: reazione(left), right_reaction: reazione(right) };
+}
 
 /** Un round di domande demo. */
 export function domandeDemo(lingua: Lingua, round: Round, risposte: Risposta[], giaChieste: string[]) {
@@ -69,30 +104,19 @@ export function domandeDemo(lingua: Lingua, round: Round, risposte: Risposta[], 
       if (libera && (giro > 0 || !scelte.some((s) => s.area === area))) scelte.push({ area, d: libera });
     }
   }
+  // 2-3 carte "questo o quello" al posto di altrettante sì/no, in posizioni sparse
+  const ab = mescola(QUESTO_O_QUELLO.filter((c) => !chieste.has(norm(c[lingua][0])))).slice(0, round === 1 ? 3 : 2);
+  const carte: ReturnType<typeof cartaSiNo>[] = scelte.slice(0, DOMANDE_PER_ROUND[round] - ab.length).map(({ area, d }) => cartaSiNo(lingua, area, d));
+  ab.forEach((c, i) => carte.splice(1 + i * 2, 0, cartaAB(lingua, c)));
   const aperta = aCaso(DOMANDE_APERTE);
   return {
-    questions: scelte.map(({ area, d }) => ({
-      emoji: EMOJI_AREA[area] ?? "🦊",
-      question: d[lingua],
-      yes_reaction: aCaso(REAZIONI[lingua].si),
-      no_reaction: aCaso(REAZIONI[lingua].no),
-    })),
+    questions: carte,
     open_question: {
       emoji: "🔍",
       question: aperta[lingua],
       hint: lingua === "it" ? "Il dettaglio che solo tu conosci fa la differenza." : "The detail only you know makes the difference.",
     },
   };
-}
-
-/** Budget dalla risposta alla domanda "Quanto vuoi spendere?" (es. "30–70 €", "Over €300"). */
-function budget(risposte: Risposta[]): { min: number; max: number } {
-  const testo = risposte.find((r) => /€/.test(r.a.join(" ")))?.a.join(" ") ?? "";
-  const numeri = (testo.match(/\d+/g) ?? []).map(Number);
-  if (/oltre|over/i.test(testo) && numeri[0]) return { min: numeri[0], max: numeri[0] * 3 };
-  if (numeri.length >= 2) return { min: numeri[0], max: numeri[1] };
-  if (numeri.length === 1) return { min: 0, max: numeri[0] };
-  return { min: 0, max: 100 };
 }
 
 function temiNelTesto(testo: string): Tema[] {
@@ -135,7 +159,30 @@ const BADGE: Partial<Record<Tema, { it: string; en: string }>> = {
   stile: { it: "✨ Icona di stile", en: "✨ Style icon" },
 };
 
-/** Un lotto di regali demo, con ritratto e titoli per il Conosciometro. */
+/** Punteggio dei temi in base alle risposte e alle idee piaciute o scartate. */
+function punteggiTemi(risposte: Risposta[], piaciute: string[] = [], scartate: string[] = []) {
+  // Punteggio dei temi
+  const punti = new Map<Tema, number>();
+  const aggiungi = (temi: Tema[], v: number) => temi.forEach((t) => punti.set(t, (punti.get(t) ?? 0) + v));
+  for (const r of risposte) {
+    const trovata = DOMANDA_PER_TESTO.get(norm(r.q));
+    const a = r.a[0] ?? "";
+    const carta = QUESTO_O_QUELLO.find((c) => norm(c.it[0]) === norm(r.q) || norm(c.en[0]) === norm(r.q));
+    if (carta) {
+      // la risposta inizia con il lato scelto (es. "Sushi (invece di Carbonara)")
+      const lati = [carta.it, carta.en].flatMap((t) => [[t[1], 0], [t[2], 1]] as const);
+      const lato = lati.find(([etichetta]) => norm(a).startsWith(norm(etichetta)))?.[1];
+      if (lato !== undefined) aggiungi(carta.temi[lato], 3);
+    } else if (trovata) aggiungi(trovata.d.temi, eSi(a) ? 3 : eNo(a) ? -2 : 0);
+    else aggiungi(temiNelTesto(r.a.join(" ")), 2);
+  }
+  const perTitolo = (titolo: string) => CATALOGO.find((g) => norm(g.it[0]) === norm(titolo) || norm(g.en[0]) === norm(titolo));
+  piaciute.forEach((t) => aggiungi(perTitolo(t)?.temi ?? [], 2));
+  scartate.forEach((t) => aggiungi(perTitolo(t)?.temi ?? [], -1.5));
+  return punti;
+}
+
+/** Un lotto di regali demo. */
 export function regaliDemo(
   lingua: Lingua,
   risposte: Risposta[],
@@ -143,22 +190,18 @@ export function regaliDemo(
   scartate: string[],
   mostrate: string[],
 ) {
-  // Punteggio dei temi
-  const punti = new Map<Tema, number>();
-  const aggiungi = (temi: Tema[], v: number) => temi.forEach((t) => punti.set(t, (punti.get(t) ?? 0) + v));
-  for (const r of risposte) {
-    const trovata = DOMANDA_PER_TESTO.get(norm(r.q));
-    const a = r.a[0] ?? "";
-    if (trovata) aggiungi(trovata.d.temi, eSi(a) ? 3 : eNo(a) ? -2 : 0);
-    else aggiungi(temiNelTesto(r.a.join(" ")), 2);
-  }
-  const perTitolo = (titolo: string) => CATALOGO.find((g) => norm(g.it[0]) === norm(titolo) || norm(g.en[0]) === norm(titolo));
-  piaciute.forEach((t) => aggiungi(perTitolo(t)?.temi ?? [], 2));
-  scartate.forEach((t) => aggiungi(perTitolo(t)?.temi ?? [], -1.5));
+  const punti = punteggiTemi(risposte, piaciute, scartate);
 
   const { min, max } = budget(risposte);
   const giaVisti = new Set(mostrate.map(norm));
-  const liberi = CATALOGO.filter((g) => !giaVisti.has(norm(g[lingua][0])));
+  // Catalogo finito: si ricomincia (così non finisce mai), prima con le idee mai votate,
+  // poi anche con quelle scartate; quelle piaciute restano nei preferiti e non tornano.
+  const votate = new Set([...piaciute, ...scartate].map(norm));
+  const piaciuteSet = new Set(piaciute.map(norm));
+  const titolo = (g: RegaloDemo) => norm(g[lingua][0]);
+  let liberi = CATALOGO.filter((g) => !giaVisti.has(titolo(g)));
+  if (liberi.length < BATCH) liberi = CATALOGO.filter((g) => !votate.has(titolo(g)));
+  if (liberi.length < BATCH) liberi = CATALOGO.filter((g) => !piaciuteSet.has(titolo(g)));
   const nelBudget = liberi.filter((g) => g.prezzo[0] <= max && g.prezzo[1] >= min);
   const candidati = (nelBudget.length >= BATCH ? nelBudget : liberi)
     .map((g) => ({ g, p: g.temi.reduce((s, t) => s + (punti.get(t) ?? 0), 0) + Math.random() * 2 }))
@@ -192,6 +235,12 @@ export function regaliDemo(
     };
   });
 
+  return { gifts };
+}
+
+/** Il dossier demo: cosa abbiamo capito, dai temi più forti. */
+export function dossierDemo(lingua: Lingua, risposte: Risposta[]) {
+  const punti = punteggiTemi(risposte);
   // Ritratto e titoli dai temi più forti
   const forti = [...punti.entries()].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([t]) => t);
   const frasi = forti.slice(0, 3).map((t) => FRASE_TEMA[t][lingua]);
@@ -205,5 +254,12 @@ export function regaliDemo(
   const badges = forti.flatMap((t) => (BADGE[t] ? [BADGE[t]![lingua]] : [])).slice(0, 3);
   if (badges.length === 0) badges.push(lingua === "it" ? "🦊 Persona speciale" : "🦊 One of a kind");
 
-  return { portrait, badges, gifts };
+  const inizi = {
+    it: ["Passione numero uno di {nome}:", "Subito dopo:", "Da non sottovalutare:", "Altro punto forte:"],
+    en: ["{nome}'s number one passion:", "Close second:", "Don't underestimate:", "Another strong point:"],
+  };
+  const insights = forti.slice(0, 4).map((t, i) => `${inizi[lingua][i]} ${FRASE_TEMA[t][lingua]}.`);
+  const aperte = risposte.filter((r) => !DOMANDA_PER_TESTO.has(norm(r.q)) && r.a.join(" ").length > 12).slice(-1);
+  aperte.forEach((r) => insights.push(lingua === "it" ? `Un dettaglio prezioso: «${r.a.join(" ")}».` : `A precious detail: “${r.a.join(" ")}”.`));
+  return { dossier: "", insights, portrait, badges };
 }

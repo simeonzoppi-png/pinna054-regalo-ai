@@ -362,3 +362,25 @@ Scelte tecniche fatte con buon senso, senza chiedere conferma. Si possono cambia
       esatto (per quella servirebbero le API dei negozi, es. Amazon PA-API);
     - **demo**: se l'AI non è attiva, non risponde o il limite è raggiunto, il server risponde con la demo
       (archivio di 56 domande e catalogo di ~70 regali, scelti in base alle risposte) invece che con un errore.
+32. **Esperienza e beta pubblica** (prompt `gifty-v3`):
+    - carte **"questo o quello"** (circa 40%) insieme alle sì/no: si scorre verso l'opzione scelta; le domande
+      partono leggere e finiscono con la più personale; anche la demo ha 12 carte "questo o quello";
+    - **regali infiniti**: ogni lotto ha un "angolo" diverso (esperienze, personalizzati, chicche per veri
+      fan, upgrade quotidiani, cose da imparare, piccoli lussi, design/tech, regali ironici, territori nuovi)
+      che ruota all'infinito escludendo le idee già mostrate; in demo il catalogo ricomincia invece di finire;
+    - **link per comprare** costruiti dal server dalla query (Amazon.it con `AMAZON_TAG_IT` + avviso
+      obbligatorio, Google Shopping), mai scritti dal modello;
+    - anteprima per WhatsApp/social (`public/og-gifty.png`), icona con la volpe di Gifty, caratteri ospitati
+      sul sito (niente Google Fonts), link alla privacy aggiornata (nome solo sul telefono, Pexels).
+33. **Gifty serve a trovare il regalo, il gioco è secondario** (richiesta del proprietario, prompt `gifty-v4`):
+    - tolti Conosciometro e "Sfida un amico": con risposte sì/no il punteggio usciva quasi sempre 100% e non
+      misurava niente;
+    - dopo le domande da scorrere c'è sempre una domanda finale "cosa ha già / cosa non sopporta";
+    - **dossier**: l'AI (effort alto) studia tutte le risposte e scrive un profilo privato dettagliato
+      (passioni e livello, gusti, cosa possiede, no-go, direzioni di regalo) più 4-5 frasi per l'utente
+      ("Ecco cosa ho capito di…"); il dossier torna dal browser a ogni lotto di regali, così le idee
+      nascono da uno studio completo e sono diverse per ogni persona;
+    - **prodotti veri** (`src/gifty/prodotti.ts`): per ogni idea il server cerca l'articolo su Google Shopping
+      Italia con Serper (`SERPER_API_KEY`) o SerpApi (`SERPAPI_API_KEY`), sceglie il primo dentro il budget
+      (+10%) e vicino al prezzo stimato, e mostra foto, prezzo reale, negozio e link; i link arrivano dal
+      servizio di ricerca, mai dal modello. Senza chiave o senza risultati: foto Pexels o emoji.
